@@ -1,0 +1,66 @@
+name: F1Dash
+options:
+  bundleIdPrefix: com.f1dash
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+  minimumXcodeGenVersion: "2.38"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  F1Dash:
+    type: application
+    platform: macOS
+    sources:
+      - F1Dash
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.f1dash.app
+        INFOPLIST_GENERATION_MODE: GeneratedByXcode
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.sports"
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        ENABLE_HARDENED_RUNTIME: true
+        CODE_SIGN_ENTITLEMENTS: ""
+        SWIFT_EMIT_LOC_STRINGS: true
+    entitlements:
+      path: F1Dash/F1Dash.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.network.client: true
+
+  F1DashTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - F1DashTests
+    dependencies:
+      - target: F1Dash
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.f1dash.tests
+        GENERATE_INFOPLIST_FILE: true
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/F1Dash.app/Contents/MacOS/F1Dash"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  F1Dash:
+    build:
+      targets:
+        F1Dash: all
+        F1DashTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - F1DashTests
+    archive:
+      config: Release
