@@ -64,6 +64,8 @@ struct ContentView: View {
                 Spacer()
                 RaceControlToolbar()
                     .transition(.scale.combined(with: .opacity))
+                ConnectionStatusView()
+                    .transition(.scale.combined(with: .opacity))
             } else {
                 Text(selectedPage.rawValue)
                     .font(.headline)

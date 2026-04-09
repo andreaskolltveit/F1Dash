@@ -13,7 +13,7 @@ final class F1LiveTimingService {
     private var listenTask: Task<Void, Never>?
     private weak var store: LiveTimingStore?
     private var reconnectCount = 0
-    private let maxReconnects = 10
+    private let maxReconnects = 50
 
     /// Delay buffer — sits between SignalR messages and the store.
     let delayBuffer = DelayBuffer()

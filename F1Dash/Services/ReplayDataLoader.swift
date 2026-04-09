@@ -6,10 +6,10 @@ actor ReplayDataLoader {
     private let logger = Logger(subsystem: "com.f1dash", category: "ReplayLoader")
     private let client = OpenF1Client()
 
-    /// Load all data for a session and build a sorted timeline.
-    /// Requests are sequential to respect OpenF1 rate limits.
-    func loadSession(sessionKey: Int) async throws -> ReplaySessionData {
-        logger.info("Loading replay data for session \(sessionKey)")
+    /// Load essential data for a session (fast — no per-driver bulk endpoints).
+    /// Returns a timeline ready for playback within ~6 seconds.
+    func loadEssentialData(sessionKey: Int) async throws -> ReplaySessionData {
+        logger.info("Loading essential replay data for session \(sessionKey)")
 
         // Sequential fetches to respect rate limits (OpenF1 returns 429 on burst)
         let drivers = try await client.fetchDrivers(sessionKey: sessionKey)
@@ -22,23 +22,109 @@ actor ReplayDataLoader {
         let teamRadio = try await client.fetchTeamRadio(sessionKey: sessionKey)
         let weather = try await client.fetchWeather(sessionKey: sessionKey)
 
-        // Location + car data require per-driver fetches (OpenF1 returns 422 without driver_number filter)
-        let driverNumbers = drivers.map(\.driverNumber)
-        var locations: [HistoricalLocation] = []
-        var carData: [HistoricalCarData] = []
-        for num in driverNumbers {
-            let driverLocs = try await client.fetchLocations(sessionKey: sessionKey, driverNumber: num)
-            locations.append(contentsOf: driverLocs)
-            let driverCar = try await client.fetchCarData(sessionKey: sessionKey, driverNumber: num)
-            carData.append(contentsOf: driverCar)
-        }
+        logger.info("Loaded essential: \(drivers.count) drivers, \(positions.count) positions, \(laps.count) laps, \(intervals.count) intervals, \(raceControl.count) RC msgs, \(stints.count) stints, \(pitStops.count) pit stops, \(teamRadio.count) radio, \(weather.count) weather")
 
-        logger.info("Loaded: \(drivers.count) drivers, \(positions.count) positions, \(laps.count) laps, \(intervals.count) intervals, \(raceControl.count) RC msgs, \(stints.count) stints, \(pitStops.count) pit stops, \(teamRadio.count) radio, \(weather.count) weather, \(locations.count) locations, \(carData.count) car data")
+        // Build timeline from essential data
+        var events = buildEssentialEvents(
+            positions: positions, laps: laps, intervals: intervals,
+            raceControl: raceControl, teamRadio: teamRadio, weather: weather,
+            stints: stints, pitStops: pitStops
+        )
 
-        // Build timeline
+        events.sort { $0.timestamp < $1.timestamp }
+
+        let lapBoundaries = buildLapBoundaries(from: laps)
+        let totalLaps = laps.map(\.lapNumber).max() ?? 0
+
+        logger.info("Built essential timeline with \(events.count) events, \(totalLaps) laps")
+
+        return ReplaySessionData(
+            drivers: drivers,
+            events: events,
+            lapBoundaries: lapBoundaries,
+            totalLaps: totalLaps,
+            stints: stints
+        )
+    }
+
+    /// Load enrichment data (location + car telemetry) — called in background after replay is ready.
+    func loadEnrichmentData(sessionKey: Int, driverNumbers: [Int]) async throws -> [ReplayEvent] {
+        logger.info("Loading enrichment data for \(driverNumbers.count) drivers")
+
         var events: [ReplayEvent] = []
 
-        // Position events
+        for num in driverNumbers {
+            // Location data
+            do {
+                let locs = try await client.fetchLocations(sessionKey: sessionKey, driverNumber: num)
+                let sampled = samplePerDriver(locs, interval: 4)
+                for loc in sampled {
+                    if let date = parseOpenF1Date(loc.date) {
+                        events.append(ReplayEvent(
+                            timestamp: date,
+                            kind: .location(driverNumber: loc.driverNumber, x: loc.x, y: loc.y, z: loc.z)
+                        ))
+                    }
+                }
+                logger.debug("Location loaded for driver \(num): \(locs.count) → \(sampled.count) sampled")
+            } catch {
+                logger.warning("Location fetch failed for driver \(num) (non-fatal): \(error.localizedDescription)")
+            }
+
+            // Car telemetry data
+            do {
+                let carData = try await client.fetchCarData(sessionKey: sessionKey, driverNumber: num)
+                let sampled = sampleCarDataPerDriver(carData, interval: 10)
+                for cd in sampled {
+                    if let date = parseOpenF1Date(cd.date) {
+                        events.append(ReplayEvent(
+                            timestamp: date,
+                            kind: .carData(driverNumber: cd.driverNumber, speed: cd.speed, rpm: cd.rpm,
+                                           gear: cd.gear, throttle: cd.throttle, brake: cd.brake, drs: cd.drs)
+                        ))
+                    }
+                }
+                logger.debug("Car data loaded for driver \(num): \(carData.count) → \(sampled.count) sampled")
+            } catch {
+                logger.warning("Car data fetch failed for driver \(num) (non-fatal): \(error.localizedDescription)")
+            }
+        }
+
+        logger.info("Enrichment complete: \(events.count) events")
+        return events
+    }
+
+    /// Load all data for a session and build a sorted timeline (legacy — full blocking load).
+    func loadSession(sessionKey: Int) async throws -> ReplaySessionData {
+        let data = try await loadEssentialData(sessionKey: sessionKey)
+
+        // Also load enrichment inline
+        let driverNumbers = data.drivers.map(\.driverNumber)
+        let enrichment = try await loadEnrichmentData(sessionKey: sessionKey, driverNumbers: driverNumbers)
+
+        var allEvents = data.events
+        allEvents.append(contentsOf: enrichment)
+        allEvents.sort { $0.timestamp < $1.timestamp }
+
+        return ReplaySessionData(
+            drivers: data.drivers,
+            events: allEvents,
+            lapBoundaries: data.lapBoundaries,
+            totalLaps: data.totalLaps,
+            stints: data.stints
+        )
+    }
+
+    // MARK: - Event Building
+
+    private func buildEssentialEvents(
+        positions: [HistoricalPosition], laps: [HistoricalLap],
+        intervals: [HistoricalInterval], raceControl: [HistoricalRaceControl],
+        teamRadio: [HistoricalTeamRadio], weather: [HistoricalWeather],
+        stints: [StintData], pitStops: [PitStopData]
+    ) -> [ReplayEvent] {
+        var events: [ReplayEvent] = []
+
         for p in positions {
             if let date = parseOpenF1Date(p.date) {
                 events.append(ReplayEvent(
@@ -48,14 +134,12 @@ actor ReplayDataLoader {
             }
         }
 
-        // Lap events
         for l in laps {
             if let dateStr = l.dateStart, let date = parseOpenF1Date(dateStr) {
                 events.append(ReplayEvent(timestamp: date, kind: .lap(l)))
             }
         }
 
-        // Interval events
         for i in intervals {
             if let date = parseOpenF1Date(i.date) {
                 events.append(ReplayEvent(
@@ -65,14 +149,12 @@ actor ReplayDataLoader {
             }
         }
 
-        // Race control events
         for rc in raceControl {
             if let date = parseOpenF1Date(rc.date) {
                 events.append(ReplayEvent(timestamp: date, kind: .raceControl(rc)))
             }
         }
 
-        // Team radio events
         for tr in teamRadio {
             if let date = parseOpenF1Date(tr.date) {
                 events.append(ReplayEvent(
@@ -82,37 +164,13 @@ actor ReplayDataLoader {
             }
         }
 
-        // Weather events
         for w in weather {
             if let date = parseOpenF1Date(w.date) {
                 events.append(ReplayEvent(timestamp: date, kind: .weather(w)))
             }
         }
 
-        // Location events (sampled: keep every Nth point per driver to reduce volume)
-        let sampledLocations = samplePerDriver(locations, interval: 4)  // ~1 update/sec instead of 4/sec
-        for loc in sampledLocations {
-            if let date = parseOpenF1Date(loc.date) {
-                events.append(ReplayEvent(
-                    timestamp: date,
-                    kind: .location(driverNumber: loc.driverNumber, x: loc.x, y: loc.y, z: loc.z)
-                ))
-            }
-        }
-
-        // Car data events (sampled: keep every Nth point per driver)
-        let sampledCarData = sampleCarDataPerDriver(carData, interval: 10)  // ~1 update per ~2.5s
-        for cd in sampledCarData {
-            if let date = parseOpenF1Date(cd.date) {
-                events.append(ReplayEvent(
-                    timestamp: date,
-                    kind: .carData(driverNumber: cd.driverNumber, speed: cd.speed, rpm: cd.rpm,
-                                   gear: cd.gear, throttle: cd.throttle, brake: cd.brake, drs: cd.drs)
-                ))
-            }
-        }
-
-        // Stint events (use lap start to approximate timestamp from laps)
+        // Stint + pit events use lap start times
         let lapStartTimes = buildLapStartTimes(from: laps)
         for s in stints {
             let lap = s.lapStart ?? 1
@@ -120,30 +178,13 @@ actor ReplayDataLoader {
                 events.append(ReplayEvent(timestamp: date, kind: .stint(s)))
             }
         }
-
-        // Pit stop events
         for p in pitStops {
             if let date = lapStartTimes[p.lapNumber] {
                 events.append(ReplayEvent(timestamp: date, kind: .pitStop(p)))
             }
         }
 
-        // Sort by timestamp
-        events.sort { $0.timestamp < $1.timestamp }
-
-        // Determine lap boundaries
-        let lapBoundaries = buildLapBoundaries(from: laps)
-        let totalLaps = laps.map(\.lapNumber).max() ?? 0
-
-        logger.info("Built timeline with \(events.count) events, \(totalLaps) laps")
-
-        return ReplaySessionData(
-            drivers: drivers,
-            events: events,
-            lapBoundaries: lapBoundaries,
-            totalLaps: totalLaps,
-            stints: stints
-        )
+        return events
     }
 
     /// Build a map of lap number → earliest timestamp for that lap.

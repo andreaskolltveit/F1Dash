@@ -19,10 +19,24 @@ actor OpenF1Client {
         return try await request(url: url)
     }
 
+    /// Fetch stints for the latest (current live) session.
+    func fetchStintsLatest() async throws -> [StintData] {
+        let url = baseURL.appendingPathComponent("stints")
+            .appending(queryItems: [URLQueryItem(name: "session_key", value: "latest")])
+        return try await request(url: url)
+    }
+
     /// Fetch all pit stops for a given session.
     func fetchPitStops(sessionKey: Int) async throws -> [PitStopData] {
         let url = baseURL.appendingPathComponent("pit")
             .appending(queryItems: [URLQueryItem(name: "session_key", value: "\(sessionKey)")])
+        return try await request(url: url)
+    }
+
+    /// Fetch pit stops for the latest (current live) session.
+    func fetchPitStopsLatest() async throws -> [PitStopData] {
+        let url = baseURL.appendingPathComponent("pit")
+            .appending(queryItems: [URLQueryItem(name: "session_key", value: "latest")])
         return try await request(url: url)
     }
 

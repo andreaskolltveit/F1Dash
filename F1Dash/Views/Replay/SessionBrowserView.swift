@@ -166,7 +166,7 @@ struct SessionBrowserView: View {
             Spacer()
             ProgressView()
                 .controlSize(.large)
-            Text("Loading session data...")
+            Text(replayEngine.loadingProgress ?? "Loading session data...")
                 .font(.headline)
                 .foregroundStyle(F1Theme.textSecondary)
             Spacer()

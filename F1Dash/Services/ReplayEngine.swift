@@ -11,6 +11,7 @@ final class ReplayEngine {
     // MARK: - Public State
 
     var state: ReplayState = .idle
+    var loadingProgress: String?
     var speed: ReplaySpeed = .x1
     var currentLap: Int = 0
     var totalLaps: Int = 0
@@ -59,13 +60,17 @@ final class ReplayEngine {
     // MARK: - Load Session Data
 
     /// Load all data for the selected session.
+    /// Loads essential data first (fast), then enrichment data in the background.
     func loadSession(_ session: OpenF1Session, store: LiveTimingStore) async {
         self.store = store
         self.selectedSession = session
         state = .loading
+        loadingProgress = "Fetching session data..."
 
         do {
-            let data = try await loader.loadSession(sessionKey: session.sessionKey)
+            // Phase 1: Essential data (~6 seconds)
+            loadingProgress = "Loading positions, laps, intervals..."
+            let data = try await loader.loadEssentialData(sessionKey: session.sessionKey)
             self.sessionData = data
             self.totalLaps = data.totalLaps
 
@@ -83,10 +88,67 @@ final class ReplayEngine {
             currentEventIndex = 0
             currentLap = 1
             state = .ready
+            loadingProgress = nil
             logger.info("Session loaded: \(data.events.count) events, \(data.totalLaps) laps")
+
+            // Phase 2: Enrichment data in background (location + car telemetry)
+            let driverNumbers = data.drivers.map(\.driverNumber)
+            let sessionKey = session.sessionKey
+            Task {
+                await loadEnrichmentData(sessionKey: sessionKey, driverNumbers: driverNumbers)
+            }
         } catch {
             logger.error("Failed to load session data: \(error.localizedDescription)")
             state = .error("Failed to load data: \(error.localizedDescription)")
+            loadingProgress = nil
+        }
+    }
+
+    /// Load location + car data in background and merge into existing timeline.
+    private func loadEnrichmentData(sessionKey: Int, driverNumbers: [Int]) async {
+        guard let data = sessionData, let store else { return }
+
+        do {
+            let enrichment = try await loader.loadEnrichmentData(
+                sessionKey: sessionKey,
+                driverNumbers: driverNumbers
+            )
+
+            // 1. Apply all enrichment events up to current replay time directly to the store
+            let now = currentTime ?? Date.distantPast
+            var futureEvents: [ReplayEvent] = []
+            for event in enrichment {
+                if event.timestamp <= now {
+                    applyEvent(event, to: store)
+                } else {
+                    futureEvents.append(event)
+                }
+            }
+            logger.info("Enrichment: applied \(enrichment.count - futureEvents.count) past events, \(futureEvents.count) future events queued")
+
+            // 2. Merge future events into the timeline and rebuild index
+            let currentTimestamp = currentTime
+            var allEvents = data.events
+            allEvents.append(contentsOf: futureEvents)
+            allEvents.sort { $0.timestamp < $1.timestamp }
+
+            let newData = ReplaySessionData(
+                drivers: data.drivers,
+                events: allEvents,
+                lapBoundaries: data.lapBoundaries,
+                totalLaps: data.totalLaps,
+                stints: data.stints
+            )
+
+            // 3. Find new index matching the current playback position
+            if let ts = currentTimestamp {
+                currentEventIndex = allEvents.firstIndex { $0.timestamp >= ts } ?? currentEventIndex
+            }
+
+            self.sessionData = newData
+            logger.info("Enrichment merged: total \(allEvents.count) events, index adjusted to \(self.currentEventIndex)")
+        } catch {
+            logger.warning("Enrichment data failed (non-fatal): \(error.localizedDescription)")
         }
     }
 
@@ -148,14 +210,18 @@ final class ReplayEngine {
     // MARK: - Playback Loop
 
     private func runPlayback() async {
-        guard let data = sessionData, let store else { return }
+        guard let store else { return }
 
         logger.info("Starting playback from event \(self.currentEventIndex)")
 
         var lastEventTime: Date?
 
-        while currentEventIndex < data.events.count {
+        while true {
             guard !Task.isCancelled else { return }
+
+            // Read sessionData each iteration so enrichment merges are picked up
+            guard let data = sessionData else { return }
+            guard currentEventIndex < data.events.count else { break }
 
             let event = data.events[currentEventIndex]
 

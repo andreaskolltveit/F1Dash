@@ -62,6 +62,7 @@ struct F1DashApp: App {
                     }
                 } else {
                     timingService.start(store: store, settings: settings)
+                    openF1Service.startLive(store: store)
                 }
             }
             .animation(.spring(response: 0.4, dampingFraction: 0.8), value: testRunner.isRunning)

@@ -18,6 +18,12 @@ struct ConnectionStatusView: View {
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
+            } else if case .disconnected = service.connectionState {
+                Button("Connect") {
+                    service.connect()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
             }
         }
     }

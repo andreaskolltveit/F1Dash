@@ -74,8 +74,8 @@ struct DashboardLeaderboardView: View {
 
     private func isFastestLap(_ driverNumber: String) -> Bool {
         guard let timing = store.timingData[driverNumber] else { return false }
-        guard let bestLap = timing.bestLapTime else { return false }
-        let allBestLaps = store.timingData.values.compactMap(\.bestLapTime)
+        guard let bestLap = timing.bestLapTime, !bestLap.isEmpty else { return false }
+        let allBestLaps = store.timingData.values.compactMap(\.bestLapTime).filter { !$0.isEmpty }
         return bestLap == allBestLaps.min()
     }
 
